@@ -17,6 +17,12 @@ use wasmtime_wasi_io::IoView;
 #[command(version, about, long_about = None)]
 struct Args {
     file: String,
+    /// Preopened directory mappings (guest_path::host_path or just path)
+    #[arg(long = "dir", value_name = "DIR")]
+    dirs: Vec<String>,
+    /// Arguments to pass to the wasm component
+    #[arg(last = true)]
+    wasm_args: Vec<String>,
 }
 
 struct HostState {
@@ -27,10 +33,31 @@ struct HostState {
 }
 
 impl HostState {
-    fn new(main_thread_proxy: wasi_surface_wasmtime::WasiWinitEventLoopProxy) -> Self {
+    fn new(
+        main_thread_proxy: wasi_surface_wasmtime::WasiWinitEventLoopProxy,
+        dirs: &[String],
+        wasm_args: &[String],
+    ) -> Self {
         Self {
             table: ResourceTable::new(),
-            ctx: WasiCtxBuilder::new().inherit_stdio().build(),
+            ctx: {
+                let mut builder = WasiCtxBuilder::new();
+                builder.inherit_stdio().inherit_env();
+                for dir_spec in dirs {
+                    let (guest, host) = if let Some((g, h)) = dir_spec.split_once("::") {
+                        (g.to_string(), std::path::PathBuf::from(h))
+                    } else {
+                        (dir_spec.clone(), std::path::PathBuf::from(dir_spec))
+                    };
+                    let host_dir = wasmtime_wasi::DirPerms::all();
+                    let host_file = wasmtime_wasi::FilePerms::all();
+                    builder.preopened_dir(host, guest, host_dir, host_file).unwrap();
+                }
+                if !wasm_args.is_empty() {
+                    builder.args(wasm_args);
+                }
+                builder.build()
+            },
             instance: Arc::new(wasi_webgpu_wasmtime::reexports::wgpu_core::global::Global::new(
                 "webgpu",
                 &wasi_webgpu_wasmtime::reexports::wgpu_types::InstanceDescriptor {
@@ -113,7 +140,10 @@ async fn main() -> anyhow::Result<()> {
 
     let (main_thread_loop, main_thread_proxy) =
         wasi_surface_wasmtime::create_wasi_winit_event_loop();
-    let host_state = HostState::new(main_thread_proxy);
+    // Prepend the wasm file name as argv[0] so the component sees a proper argc/argv
+    let mut full_args = vec![args.file.clone()];
+    full_args.extend_from_slice(&args.wasm_args);
+    let host_state = HostState::new(main_thread_proxy, &args.dirs, &full_args);
 
     let mut store = Store::new(&engine, host_state);
 
@@ -126,10 +156,16 @@ async fn main() -> anyhow::Result<()> {
             .unwrap();
 
     std::thread::spawn(move || {
-        pollster::block_on(command.wasi_cli_run().call_run(&mut store))
-            .context("failed to invoke `run` function")
-            .unwrap()
-            .unwrap();
+        let result = pollster::block_on(command.wasi_cli_run().call_run(&mut store));
+        let exit_code = match result.context("failed to invoke `run` function") {
+            Ok(Ok(())) => 0,
+            Ok(Err(())) => 1,
+            Err(e) => {
+                eprintln!("{e:?}");
+                1
+            }
+        };
+        std::process::exit(exit_code);
     });
 
     main_thread_loop.run();
