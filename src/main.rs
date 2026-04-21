@@ -1,4 +1,4 @@
-use anyhow::Context;
+use wasmtime::error::Context;
 use clap::Parser;
 use std::sync::Arc;
 use wasi_frame_buffer_wasmtime::WasiFrameBufferView;
@@ -60,12 +60,14 @@ impl HostState {
             },
             instance: Arc::new(wasi_webgpu_wasmtime::reexports::wgpu_core::global::Global::new(
                 "webgpu",
-                &wasi_webgpu_wasmtime::reexports::wgpu_types::InstanceDescriptor {
+                wasi_webgpu_wasmtime::reexports::wgpu_types::InstanceDescriptor {
                     backends: wasi_webgpu_wasmtime::reexports::wgpu_types::Backends::all(),
                     flags: wasi_webgpu_wasmtime::reexports::wgpu_types::InstanceFlags::from_build_config(),
-                    backend_options: wasi_webgpu_wasmtime::reexports::wgpu_types::BackendOptions::default(),
                     memory_budget_thresholds: wasi_webgpu_wasmtime::reexports::wgpu_types::MemoryBudgetThresholds::default(),
+                    backend_options: wasi_webgpu_wasmtime::reexports::wgpu_types::BackendOptions::default(),
+                    display: None,
                 },
+                None,
             )),
             main_thread_proxy,
         }
